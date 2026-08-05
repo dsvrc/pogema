@@ -51,8 +51,7 @@ def main():
         bq, ba = table(K=6.0, sigma=sigma)
         q_collapses = bq[0] < 14
         a_collapses = ba[0] < 14
-        print(f'  queue collapses? {"YES" if q_collapses else "NO -- monotone, '
-              f'yielding can never help"}')
+        print(f'  queue collapses? {"YES" if q_collapses else "NO -- monotone, 'f'yielding can never help"}')
         print(f'  aloha collapses? {"YES" if a_collapses else "NO"}')
 
     print('\nHETEROGENEITY CHECK (§4 role emergence needs s_i to change the peak)')
