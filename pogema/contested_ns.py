@@ -103,12 +103,15 @@ class ContestedCorridorNS(PogemaWrapper):
     S_SPREAD = 0.6      # susceptibility spread, tier 3 only
     S_PERIOD = 96       # susceptibility rotation period (§4: "who is fragile drifts")
 
-    def __init__(self, env, sigma=0.0, tier=3, corridor_width=1, expose_oracle=False):
+    def __init__(self, env, sigma=0.0, tier=3, corridor_width=1, expose_oracle=False,
+                 trace=False):
         super().__init__(env)
         self.sigma = float(sigma)
         self.tier = int(tier)
         self.corridor_width = corridor_width
         self.expose_oracle = expose_oracle
+        self.trace = trace
+        self.trace_log = []
         self.k_max = self.K_MAX[self.tier]
         self._n_corr = len(CORRIDOR_ROWS)
         self._rng = np.random.default_rng(0)
@@ -143,6 +146,7 @@ class ContestedCorridorNS(PogemaWrapper):
         self._spawn_row = [xy[0] for xy in self.get_agents_xy(ignore_borders=True)]
         self._ep = {'A': [], 'u': [], 'l': [], 'throttled': 0, 'medium_steps': 0,
                     'K_min': self.k_max}
+        self.trace_log = []
         return obs, infos
 
     def step(self, actions):
@@ -163,12 +167,14 @@ class ContestedCorridorNS(PogemaWrapper):
         # passage -- the medium ends up scheduling the team one-at-a-time and ISR
         # RECOVERS as sigma grows. Measured with occupancy: ISR 0.52 at sigma=3 but
         # 0.76 at sigma=6, non-monotonic. Demand keeps retries on the books.
-        claim = []
+        inside, claim = [], []
         for i, (x, y) in enumerate(xy):
             if not active[i]:
+                inside.append(None)
                 claim.append(None)
                 continue
             c = corridor_of(x, y, self.corridor_width)
+            inside.append(c)
             if c is None:
                 dx, dy = moves[actions[i]]
                 c = corridor_of(x + dx, y + dy, self.corridor_width)
@@ -180,6 +186,7 @@ class ContestedCorridorNS(PogemaWrapper):
                 L[c] += 1
 
         n_throttled = 0
+        step_u, step_p = [], []
         for i, (x, y) in enumerate(xy):
             if not active[i]:
                 continue
@@ -195,6 +202,8 @@ class ContestedCorridorNS(PogemaWrapper):
             self._ep['u'].append(u)
             self._ep['l'].append(liability)
             self._ep['medium_steps'] += 1
+            step_u.append(u)
+            step_p.append(p_serve)
 
             # service DELAY: the move is not served this step. Never destroyed,
             # and not unilaterally invertible -- you cannot move faster than the
@@ -213,6 +222,24 @@ class ContestedCorridorNS(PogemaWrapper):
         self._ep['A'].append(A)
         self._ep['throttled'] += n_throttled
         self._ep['K_min'] = min(self._ep['K_min'], float(self._K.min()))
+
+        if self.trace:
+            self.trace_log.append(dict(
+                t=self._t, A=A,
+                K=self._K.copy(),
+                demand=L.copy(),
+                n_inside=sum(1 for c in inside if c is not None),
+                n_queued=sum(1 for i in range(len(claim))
+                             if claim[i] is not None and inside[i] is None),
+                n_idle=sum(1 for i in range(len(claim))
+                           if active[i] and claim[i] is None and inside[i] is None),
+                n_done=sum(1 for i in range(len(xy)) if not active[i]),
+                throttled=n_throttled,
+                u_mean=float(np.mean(step_u)) if step_u else 0.0,
+                u_max=float(np.max(step_u)) if step_u else 0.0,
+                p_min=float(np.min(step_p)) if step_p else 1.0,
+                k_at_floor=bool((self._K <= 0.26).any()),
+            ))
         self._t += 1
 
         obs, reward, terminated, truncated, infos = self.env.step(actions)
@@ -233,7 +260,7 @@ class ContestedCorridorNS(PogemaWrapper):
 
 
 def make_contested_env(num_agents=8, sigma=0.0, tier=3, horizon=128,
-                       corridor_width=1, expose_oracle=False, seed=None):
+                       corridor_width=1, expose_oracle=False, seed=None, trace=False):
     cfg = GridConfig(
         map=build_map(corridor_width),
         num_agents=num_agents,
@@ -246,4 +273,5 @@ def make_contested_env(num_agents=8, sigma=0.0, tier=3, horizon=128,
         seed=seed,
     )
     return ContestedCorridorNS(pogema_v0(grid_config=cfg), sigma=sigma, tier=tier,
-                               corridor_width=corridor_width, expose_oracle=expose_oracle)
+                               corridor_width=corridor_width, expose_oracle=expose_oracle,
+                               trace=trace)
