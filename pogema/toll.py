@@ -242,11 +242,15 @@ class TollLambdaArm(BaseArm):
     name = 'toll'
     RHO = 0.15        # EWMA rate for felt liability
     ALPHA = 0.10      # dual ascent step
-    # DERIVED, not tuned: under the Aloha harm curve team throughput
-    # C*exp(-(L-1)*sigma*A/K) peaks exactly at u = 1, i.e. L = K/(sigma*A).
-    # Driving felt degradation to 1.0 drives the medium to its throughput maximum,
-    # which is what a shadow price is supposed to do. The old 0.25 was arbitrary.
-    L_TARGET = 1.0
+    # DERIVED, not tuned. Team throughput C*exp(-(L-1)*sigma*A/K) peaks at u = 1.
+    # But l_hat is the fraction of attempts BLOCKED, not the congestion ratio u --
+    # different quantities, different scales. At the peak p_serve = exp(-1) = 0.368,
+    # so the block fraction there is 1 - exp(-1).
+    #
+    # Setting this to 1.0 (the u-scale value) made (l_hat - L_TARGET) permanently
+    # negative, pinning lambda at 0, so admit was always True and TOLL was identical
+    # to blind by construction: lam 0.000, vol_wait 0, same time to the decimal.
+    L_TARGET = 1.0 - np.exp(-1.0)   # 0.632: the throughput-maximising block rate
     W_ROUTE = 3.0     # price weight in corridor choice
     LAM_MAX = 3.0
 
@@ -357,7 +361,10 @@ def main():
     p.add_argument('--tier', type=int, default=3)
     p.add_argument('--horizon', type=int, default=80)
     p.add_argument('--episodes', type=int, default=160)
-    p.add_argument('--sigmas', type=float, nargs='+', default=[0.0, 1.0, 2.0, 3.0])
+    # With TIME as the metric and a generous horizon, slack >= 1.2 now holds across
+    # the whole range (measured: 1.90 at sigma=6), so the old sigma<=3 cap is void.
+    p.add_argument('--sigmas', type=float, nargs='+',
+                   default=[0.0, 1.0, 2.0, 3.0, 4.0, 6.0])
     p.add_argument('--arms', nargs='+', default=list(ARMS))
     p.add_argument('--verbose', action='store_true', help='per-step log, first episode')
     args = p.parse_args()
@@ -395,6 +402,17 @@ def main():
                   f'{r["vol_wait"]:>9.0f} {r["balance"]:>8.3f} {r["slack"]:>7.2f}')
         print()
 
+    tgt = TollLambdaArm.L_TARGET
+    print(f'PRICE SETPOINT  l_target = {tgt:.3f} (= 1 - e^-1, the throughput peak).')
+    print('  A price can only help where the medium is PAST the peak, i.e. where')
+    print('  blind blk_rt > l_target. Below that, piling in is genuinely correct and')
+    print('  TOLL should (rightly) not yield -- that is the mechanism working.')
+    for sigma in args.sigmas:
+        if ('blind', sigma) in results:
+            br = results[('blind', sigma)]['block_rate']
+            print(f'    sigma={sigma}: blind blk_rt={br:.3f} '
+                  f'{"PAST peak -- price should engage" if br > tgt else "below peak"}')
+    print()
     print('DIAGNOSIS GUIDE')
     print('  lam ~ 0 everywhere      -> felt signal never reaches the price; check')
     print('                             block detection (collisions vs throttle).')
