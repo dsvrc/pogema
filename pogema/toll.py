@@ -93,9 +93,11 @@ class Navigator:
 class BaseArm:
     name = 'base'
 
-    def __init__(self, n_agents, n_corridors=len(CORRIDOR_ROWS), seed=0):
+    def __init__(self, n_agents, n_corridors=len(CORRIDOR_ROWS), seed=0,
+                 corridor_width=3):
         self.n = n_agents
         self.nc = n_corridors
+        self.corridor_width = corridor_width
         self.rng = np.random.default_rng(seed)
         # PERSISTENT learned state -- lambda is a learned quantity like a policy
         # parameter and must survive across episodes. Resetting it each episode gave
@@ -152,6 +154,36 @@ class BaseArm:
             self.on_block(i, k)
         self.tried_entry[i] = None
 
+    def reroute(self, obs, xys, active):
+        """Default: no rerouting. Arms that price corridors override this."""
+        return obs
+
+    def _aim_at_corridor(self, obs, xys, active, corridor_width=3):
+        """Steer A* to a CHOSEN corridor by swapping its goal for that corridor's
+        entry cell while the agent is still in the home region.
+
+        Reuses the navigator that passes the gate at ISR 1.000 instead of
+        hand-rolling routing again (that scored 0.684 and deadlocked). obs['xy'] and
+        obs['target_xy'] share one relative frame, so the sub-goal is just the
+        entry cell expressed as an offset from the agent's absolute position.
+        """
+        out = list(obs)
+        for i in range(self.n):
+            if not active[i]:
+                continue
+            r, c = xys[i]
+            if c >= LEFT_W:      # already in the medium or past it
+                continue
+            k = self.cheapest_corridor(i)
+            self.chosen[i] = k
+            gr = CORRIDOR_ROWS[k] + corridor_width // 2
+            gc = LEFT_W
+            o = dict(obs[i])
+            rx, ry = o['xy']
+            o['target_xy'] = (rx + (gr - r), ry + (gc - c))
+            out[i] = o
+        return out
+
     def act_all(self, obs, xys, active, moves):
         """Navigation is delegated to stock BatchAStarAgent; the arm overrides ONLY
         the admission decision.
@@ -161,6 +193,7 @@ class BaseArm:
         collisions, and blind ISR then ROSE with severity because the throttle was
         relieving that deadlock. Delegating navigation removes the confound entirely
         and isolates the method to the one decision it is about."""
+        obs = self.reroute(obs, xys, active)
         actions = list(self.nav.act(obs))
 
         for i in range(self.n):
@@ -285,7 +318,59 @@ class TollLambdaArm(BaseArm):
         return (1.0 - self.l_hat[i, k]) - self.lam[i, k] > 0.0
 
 
-ARMS = {a.name: a for a in (BlindArm, AIMDArm, TollLambdaArm)}
+class TollPhaseArm(TollLambdaArm):
+    """TOLL with PHASE-INDEXED prices and price-based ROUTING -- METHOD §5's T3 row
+    literally asks for "priced, phase-tracking role allocation", and the reactive
+    scalar price implements neither half.
+
+    Why the reactive version cannot win here (measured): blind runs at u ~= 0.68
+    against a throughput peak at u = 1, i.e. the medium is UNDER-loaded. Backing off
+    optimises in the wrong direction. The exploitable structure is not load level but
+    PHASE: A_c(t) is periodic and staggered across corridors, so at any instant one
+    corridor is in its trough (A=0.35) while another is at peak (A=1.0), a ~3x swing
+    in u. A* always takes the NEAREST corridor and ignores this entirely.
+
+    Still fully decentralized: each agent indexes its OWN felt degradation by driver
+    phase (the period is fixed and published, §9) and routes itself. No messages, no
+    shared state, nobody else's price.
+    """
+    name = 'phase'
+    N_BUCKETS = 8
+
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        self.lam_ph = np.zeros((self.n, self.nc, self.N_BUCKETS))
+        self.l_ph = np.zeros((self.n, self.nc, self.N_BUCKETS))
+        self.t = 0
+
+    def bucket(self, period=64):
+        return int((self.t % period) / period * self.N_BUCKETS) % self.N_BUCKETS
+
+    def _update_price(self, i, k, blocked):
+        super()._update_price(i, k, blocked)
+        b = self.bucket()
+        self.l_ph[i, k, b] = (1 - self.RHO) * self.l_ph[i, k, b] + self.RHO * float(blocked)
+        self.lam_ph[i, k, b] = float(np.clip(
+            self.lam_ph[i, k, b] + self.ALPHA * (self.l_ph[i, k, b] - self.L_TARGET),
+            0.0, self.LAM_MAX))
+
+    def cheapest_corridor(self, i):
+        """Route by CURRENT phase price. This is the lever A* cannot use."""
+        b = self.bucket()
+        return int(np.argmin(self.l_ph[i, :, b]))
+
+    def reroute(self, obs, xys, active):
+        self.t += 1
+        return self._aim_at_corridor(obs, xys, active, self.corridor_width)
+
+    def admit(self, i, k):
+        b = self.bucket()
+        if self.rng.random() < self.EPS_PROBE:
+            return True
+        return (1.0 - self.l_ph[i, k, b]) - self.lam_ph[i, k, b] > 0.0
+
+
+ARMS = {a.name: a for a in (BlindArm, AIMDArm, TollLambdaArm, TollPhaseArm)}
 
 
 # ---------------------------------------------------------------- TOLL-G stub
