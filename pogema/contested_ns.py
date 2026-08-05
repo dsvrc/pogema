@@ -97,7 +97,9 @@ class ContestedCorridorNS(PogemaWrapper):
     # silently identical to tier 2.
     K_MAX = {1: 64.0, 2: 2.0, 3: 2.0}
     TAU_K = 12.0        # capacity regeneration time constant
-    DAMAGE = 0.25       # d
+    DAMAGE = 0.12       # d
+    K_FLOOR = 0.75      # K may dip and recover, but never far enough that entry
+                        # becomes impossible -- §3.1 "never irrecoverable"
     H_FLOOR = 0.05      # h(u) = u/max(1-u, H_FLOOR)
     DRIVER_PERIOD = 64
     S_SPREAD = 0.6      # susceptibility spread, tier 3 only
@@ -194,6 +196,18 @@ class ContestedCorridorNS(PogemaWrapper):
             if c is None:
                 continue  # not using the medium this step; home/delivery regions are free
 
+            # ADMISSION CONTROL: throttle entry, never service in progress.
+            # Throttling agents already inside is a positive feedback to deadlock --
+            # a stalled agent lingers, lingering raises demand, demand raises the
+            # throttle. Measured: 2 agents frozen inside a corridor at p=0.004 for
+            # 30 straight steps, holding demand at 3 and K pinned at the clip floor,
+            # so the corridor never drained. That makes the medium IRRECOVERABLE,
+            # which §3.1 forbids outright. Physically it was wrong too: CSMA/CA
+            # gates channel access, not packet transit.
+            # Agents inside still count as load L (they do occupy the corridor).
+            if inside[i] is not None:
+                continue
+
             L_minus_i = L[c] - 1.0  # exclude i's own claim
             u = gain * L_minus_i / max(self._K[c], 1e-6)
             liability = self._susceptibility(i) * self._h(u)
@@ -217,7 +231,7 @@ class ContestedCorridorNS(PogemaWrapper):
         if self.tier >= 3:
             overload = np.maximum(0.0, L - self._K)
             self._K += (self.k_max - self._K) / self.TAU_K - self.DAMAGE * gain * overload
-            self._K = np.clip(self._K, 0.25, self.k_max)
+            self._K = np.clip(self._K, self.K_FLOOR, self.k_max)
 
         self._ep['A'].append(A)
         self._ep['throttled'] += n_throttled
@@ -238,7 +252,7 @@ class ContestedCorridorNS(PogemaWrapper):
                 u_mean=float(np.mean(step_u)) if step_u else 0.0,
                 u_max=float(np.max(step_u)) if step_u else 0.0,
                 p_min=float(np.min(step_p)) if step_p else 1.0,
-                k_at_floor=bool((self._K <= 0.26).any()),
+                k_at_floor=bool((self._K <= self.K_FLOOR + 0.01).any()),
             ))
         self._t += 1
 
