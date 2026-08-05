@@ -60,18 +60,29 @@ def corridor_of(row, col, corridor_width=1):
 
 # ---------------------------------------------------------------- driver A(t)
 
-def shift_driver(t, period=64, ramp_frac=0.15, on_frac=0.35):
-    """Warehouse bot-shift schedule: ramp up, hold, ramp down, off (§8.6 -- the
-    driver's shape should match the domain; a shift is a trapezoid, not a sinusoid).
-    Periodic, so the episode shows collapse AND recovery (§8.7)."""
+A_MIN = 0.35  # baseline bot traffic -- the driver NEVER reaches zero
+
+
+def shift_driver(t, period=64, ramp_frac=0.15, on_frac=0.35, a_min=A_MIN):
+    """Warehouse bot-shift schedule: ramp up, hold, ramp down, back to baseline
+    (§8.6 -- shape should match the domain; a shift is a trapezoid, not a sinusoid).
+    Periodic, so the episode shows collapse AND recovery (§8.7).
+
+    A(t) in [a_min, 1], never 0. With a_min=0 the medium goes completely free during
+    the off phase, and agents simply wait out every congested window -- measured:
+    throttle 0.30 and makespan 30.8 -> 77.5, yet ISR held at 0.995, i.e. the NS was
+    fully absorbed. The template's (1+sigma*A) supplies this floor structurally; we
+    gate by sigma instead (so sigma=0 stays stationary) and put the floor in A."""
     ph = (t % period) / period
     if ph < ramp_frac:
-        return ph / ramp_frac
-    if ph < ramp_frac + on_frac:
-        return 1.0
-    if ph < 2 * ramp_frac + on_frac:
-        return 1.0 - (ph - ramp_frac - on_frac) / ramp_frac
-    return 0.0
+        peak = ph / ramp_frac
+    elif ph < ramp_frac + on_frac:
+        peak = 1.0
+    elif ph < 2 * ramp_frac + on_frac:
+        peak = 1.0 - (ph - ramp_frac - on_frac) / ramp_frac
+    else:
+        peak = 0.0
+    return a_min + (1.0 - a_min) * peak
 
 
 # ---------------------------------------------------------------- the wrapper

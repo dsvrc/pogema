@@ -95,6 +95,27 @@ def certificates(args):
     print(f'  => {"PASS" if ok_s0 else "FAIL"}')
 
 
+def sweep_horizon(args):
+    """POGEMA's reward is 1.0 on-goal and nothing else, so ISR is blind to delay
+    until an agent misses the horizon. The NS can therefore only register once the
+    horizon binds. Slack (§3.1/§6.6) is defined against the COORDINATED schedule --
+    the horizon must fit a staggered crossing but not an unstaggered throttled one.
+    This scan finds that window; sigma=0 is the coordinated-ish reference."""
+    print(f'horizon scan  N={args.n}  tier={args.tier}  episodes={args.episodes}')
+    print(f'{"horizon":>8} {"ISR@s=0":>9} {"ISR@s=3":>9} {"gap":>7} '
+          f'{"mk@s=0":>8} {"mk@s=3":>8} {"slack":>7}')
+    for horizon in (64, 80, 96, 112, 128):
+        r0 = run(args.n, 0.0, args.tier, horizon, args.episodes)
+        r3 = run(args.n, 3.0, args.tier, horizon, args.episodes)
+        slack = horizon / r0['makespan'] if r0['makespan'] == r0['makespan'] else float('nan')
+        print(f'{horizon:>8} {r0["isr"]:>9.3f} {r3["isr"]:>9.3f} '
+              f'{r0["isr"] - r3["isr"]:>7.3f} {r0["makespan"]:>8.1f} '
+              f'{r3["makespan"]:>8.1f} {slack:>7.2f}')
+    print()
+    print('  want: ISR@s=0 == 1.000 (B0 intact), ISR@s=3 well below it (§3.4),')
+    print('        and slack >= 1.2 measured at sigma=0 (§6.6).')
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument('--n', type=int, default=8)
@@ -102,8 +123,14 @@ def main():
     p.add_argument('--horizon', type=int, default=128)
     p.add_argument('--episodes', type=int, default=160)
     p.add_argument('--certificates', action='store_true')
+    p.add_argument('--sweep-horizon', action='store_true')
     args = p.parse_args()
-    certificates(args) if args.certificates else sweep(args)
+    if args.certificates:
+        certificates(args)
+    elif args.sweep_horizon:
+        sweep_horizon(args)
+    else:
+        sweep(args)
 
 
 if __name__ == '__main__':
