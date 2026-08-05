@@ -342,6 +342,11 @@ class TollPhaseArm(TollLambdaArm):
         self.lam_ph = np.zeros((self.n, self.nc, self.N_BUCKETS))
         self.l_ph = np.zeros((self.n, self.nc, self.N_BUCKETS))
         self.t = 0
+        self.committed = np.full(self.n, -1)
+
+    def reset_episode(self):
+        super().reset_episode()
+        self.committed = np.full(self.n, -1)
 
     def bucket(self, period=64):
         return int((self.t % period) / period * self.N_BUCKETS) % self.N_BUCKETS
@@ -355,12 +360,23 @@ class TollPhaseArm(TollLambdaArm):
             0.0, self.LAM_MAX))
 
     def cheapest_corridor(self, i):
-        """Route by CURRENT phase price. This is the lever A* cannot use."""
-        b = self.bucket()
-        return int(np.argmin(self.l_ph[i, :, b]))
+        """Route by CURRENT phase price, then COMMIT.
+
+        Re-choosing every step thrashes: an agent halfway to corridor 0 switches to
+        corridor 1, walks back, switches again. Measured without commitment: balance
+        rose 0.774 -> 0.920 and block rate fell 0.616 -> 0.443 (routing was working),
+        yet TIME got WORSE, 63.3 -> 70.0 -- less congestion, more walking."""
+        if self.committed[i] < 0:
+            b = self.bucket()
+            self.committed[i] = int(np.argmin(self.l_ph[i, :, b]))
+        return int(self.committed[i])
 
     def reroute(self, obs, xys, active):
         self.t += 1
+        for i in range(self.n):
+            r, c = xys[i]
+            if c >= LEFT_W:      # entered the medium: release for the next crossing
+                self.committed[i] = -1
         return self._aim_at_corridor(obs, xys, active, self.corridor_width)
 
     def admit(self, i, k):

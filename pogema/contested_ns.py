@@ -115,7 +115,17 @@ class ContestedCorridorNS(PogemaWrapper):
     K_MAX = {1: 64.0, 2: 6.0, 3: 6.0}
     HARM = 'aloha'      # 'aloha' = CSMA contention (collapses); 'queue' = M/M/1 (does not)
     TAU_K = 12.0        # capacity regeneration time constant
-    DAMAGE = 0.15       # d -- per FAILED ATTEMPT (collision), not per unit overload
+    # d -- per FAILED ATTEMPT (collision), not per unit overload.
+    #
+    # Sized so collisions genuinely destroy capacity. A probabilistic admission
+    # throttle is a NEGATIVE-feedback controller: more load -> lower p_serve -> fewer
+    # admissions -> load falls. It pins the medium near its throughput peak, where
+    # the loss from being off-optimum is SECOND ORDER. Measured at DAMAGE=0.15:
+    # blind sat at u~1.16 against a peak of 1.0, and the best any price could buy was
+    # -0.6 steps (~1%). A first-order gap needs POSITIVE feedback -- overload must
+    # cause more overload. At ~0.28 collisions/step/corridor, holding K near the
+    # floor requires DAMAGE ~ (k_max - K_floor)/TAU_K / 0.28 ~ 1.2.
+    DAMAGE = 1.0
     K_FLOOR = 2.0       # K may dip and recover, but never far enough that entry
                         # becomes impossible -- §3.1 "never irrecoverable"
     H_FLOOR = 0.05      # h(u) = u/max(1-u, H_FLOOR)
