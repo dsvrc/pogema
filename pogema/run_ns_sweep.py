@@ -119,6 +119,29 @@ def sweep_horizon(args):
     print('        and slack >= 1.2 measured at sigma=0 (§6.6).')
 
 
+def sweep_n(args):
+    """Is the medium actually contested, or just under-subscribed?
+
+    Measured at N=8: dem_mn 0.69 (mean demand per corridor BELOW one agent),
+    %queued 9.5% at sigma=6. u = sigma*A*L_{-i}/K is exactly 0 whenever L_{-i}=0,
+    so severity cannot bite on an empty corridor. If ISR collapses as N rises at
+    fixed sigma, the medium was simply under-subscribed. If it does not, the load
+    definition is wrong (it counts cell occupancy, not §7's REGIONAL occupancy --
+    agents backed up in the home region heading for corridor c contribute nothing)."""
+    print(f'team-size sweep  tier={args.tier}  horizon={args.horizon}  '
+          f'episodes={args.episodes}')
+    print(f'{"N":>4} {"sigma":>6} {"ISR":>7} {"throttle":>9} {"u_mean":>8} '
+          f'{"trunc":>7} {"makespan":>9}')
+    for n in (8, 16, 24, 32):
+        for sigma in (0.0, 1.0, 3.0, 6.0):
+            r = run(n, sigma, args.tier, args.horizon, args.episodes)
+            print(f'{n:>4} {sigma:>6.1f} {r["isr"]:>7.3f} {r["throttle"]:>9.3f} '
+                  f'{r["u"]:>8.2f} {r["trunc"]:>7.1%} {r["makespan"]:>9.1f}')
+        print()
+    print('  B0 must stay 1.000 at sigma=0 for EVERY N, or the map is capacity-bound')
+    print('  and the METHOD §8 scaling experiment is confounded.')
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument('--n', type=int, default=8)
@@ -127,11 +150,14 @@ def main():
     p.add_argument('--episodes', type=int, default=160)
     p.add_argument('--certificates', action='store_true')
     p.add_argument('--sweep-horizon', action='store_true')
+    p.add_argument('--sweep-n', action='store_true')
     args = p.parse_args()
     if args.certificates:
         certificates(args)
     elif args.sweep_horizon:
         sweep_horizon(args)
+    elif args.sweep_n:
+        sweep_n(args)
     else:
         sweep(args)
 
