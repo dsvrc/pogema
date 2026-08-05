@@ -164,7 +164,7 @@ class ContestedCorridorNS(PogemaWrapper):
         self._K = np.full(self._n_corr, self.k_max)
         self._spawn_row = [xy[0] for xy in self.get_agents_xy(ignore_borders=True)]
         self._ep = {'A': [], 'u': [], 'l': [], 'throttled': 0, 'medium_steps': 0,
-                    'K_min': self.k_max}
+                    'K_min': self.k_max, 'k_eff_integral': 0.0}
         self.trace_log = []
         return obs, infos
 
@@ -250,6 +250,15 @@ class ContestedCorridorNS(PogemaWrapper):
             self._K += (self.k_max - self._K) / self.TAU_K - self.DAMAGE * gain * overload  # gain is per-corridor
             self._K = np.clip(self._K, self.K_FLOOR, self.k_max)
 
+        # §6.6 SLACK AUDIT. K_eff_c = the load corridor c can carry with NO penalty:
+        # h is free while u < 1, and u = sigma*A_c*L_{-i}/K_c, so the penalty-free
+        # concurrent load is K_c/(sigma*A_c). Integrated over the episode this gives
+        # agent-steps of free transit, directly comparable to W_required.
+        if self.sigma > 0:
+            self._ep['k_eff_integral'] += float(np.sum(self._K / np.maximum(gain, 1e-6)))
+        else:
+            self._ep['k_eff_integral'] += float(np.sum(self._K)) * 1e3  # unconstrained
+
         self._ep['A'].append(float(A.mean()))
         self._ep['throttled'] += n_throttled
         self._ep['K_min'] = min(self._ep['K_min'], float(self._K.min()))
@@ -280,7 +289,12 @@ class ContestedCorridorNS(PogemaWrapper):
                 infos[i]['oracle'] = {'A': A.copy(), 'K': self._K.copy(), 'sigma': self.sigma}
 
         if all(terminated) or all(truncated):
+            # W_required: every agent must occupy corridor cells for MID_W steps.
+            w_required = self.grid_config.num_agents * MID_W
             infos[0].setdefault('metrics', {}).update(
+                ns_slack=self._ep['k_eff_integral'] / max(w_required, 1),
+            )
+            infos[0]['metrics'].update(
                 ns_A_mean=float(np.mean(self._ep['A'])),
                 ns_u_mean=float(np.mean(self._ep['u'])) if self._ep['u'] else 0.0,
                 ns_l_mean=float(np.mean(self._ep['l'])) if self._ep['l'] else 0.0,
