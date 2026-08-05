@@ -92,22 +92,30 @@ class Navigator:
 class BaseArm:
     name = 'base'
 
+    ESCAPE_AFTER = 2   # steps stuck before taking a sidestep (deadlock escape)
+
     def __init__(self, n_agents, n_corridors=len(CORRIDOR_ROWS), seed=0):
         self.n = n_agents
         self.nc = n_corridors
         self.rng = np.random.default_rng(seed)
-        self.reset()
+        # PERSISTENT learned state -- lambda is a learned quantity like a policy
+        # parameter and must survive across episodes. Resetting it each episode gave
+        # only ~2.4 dual updates per agent per episode, so the price never converged
+        # (measured: l_hat 0.053 against a block rate of 0.73).
+        self.l_hat = np.zeros((self.n, self.nc))
+        self.lam = np.zeros((self.n, self.nc))
+        self.reset_episode()
 
-    def reset(self):
-        self.l_hat = np.zeros((self.n, self.nc))     # felt liability
-        self.lam = np.zeros((self.n, self.nc))       # local shadow price
+    def reset_episode(self):
+        """Episode-local bookkeeping ONLY. Never touches l_hat / lam."""
         self.attempts = np.zeros((self.n, self.nc))
         self.blocks = np.zeros((self.n, self.nc))
         self.admits = np.zeros((self.n, self.nc))
         self.voluntary_waits = np.zeros(self.n)
         self.chosen = np.full(self.n, -1)
         self.last_xy = [None] * self.n
-        self.tried_entry = [None] * self.n           # corridor attempted last step
+        self.tried_entry = [None] * self.n
+        self.stuck = np.zeros(self.n, dtype=int)
 
     # -- per-arm hooks ------------------------------------------------
 
@@ -121,6 +129,12 @@ class BaseArm:
         pass
 
     def on_admit(self, i, k):
+        pass
+
+    def on_idle(self, i, k):
+        """Agent is at the mouth but chose not to attempt. Arms that price on felt
+        degradation MUST decay here, or refusing becomes absorbing: refuse -> no
+        observation -> l_hat never falls -> refuse forever."""
         pass
 
     # -- driver -------------------------------------------------------
@@ -147,6 +161,19 @@ class BaseArm:
         self.observe(i, xy)
         region = Navigator.region(r, c)
 
+        # DEADLOCK ESCAPE. Agents converging on one corridor row stack up and block
+        # each other under 'soft' collisions; re-issuing the same blocked move stalls
+        # forever. Measured without this: ISR 0.686 at sigma=0 where BatchAStarAgent
+        # gets 1.000, and blind ISR then RISES with severity because the throttle was
+        # desynchronizing the deadlock (§8.3, throttle-as-help).
+        moved = self.last_xy[i] is None or tuple(xy) != tuple(self.last_xy[i])
+        at_mouth = any(Navigator.at_mouth(r, c, k) for k in range(self.nc))
+        self.stuck[i] = 0 if moved else self.stuck[i] + 1
+        if self.stuck[i] >= self.ESCAPE_AFTER and not at_mouth and region == 'home':
+            self.last_xy[i] = xy
+            self.stuck[i] = 0
+            return int(self.rng.choice([UP, DOWN, LEFT, RIGHT]))
+
         if region == 'delivery':
             self.last_xy[i] = xy
             return Navigator.step_in_delivery(r, c, target[0], target[1])
@@ -166,6 +193,7 @@ class BaseArm:
             self.tried_entry[i] = k
             return RIGHT
         self.voluntary_waits[i] += 1
+        self.on_idle(i, k)
         return WAIT
 
 
@@ -183,9 +211,9 @@ class AIMDArm(BaseArm):
     BETA = 0.55      # multiplicative decrease on block
     P_MIN = 0.02
 
-    def reset(self):
-        super().reset()
-        self.p = np.ones((self.n, self.nc))
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        self.p = np.ones((self.n, self.nc))  # persistent, like lambda
 
     def admit(self, i, k):
         return self.rng.random() < self.p[i, k]
@@ -228,10 +256,17 @@ class TollLambdaArm(BaseArm):
             self.lam[i, k] + self.ALPHA * (self.l_hat[i, k] - self.L_TARGET),
             0.0, self.LAM_MAX))
 
+    EPS_PROBE = 0.10  # persistent excitation: never stop sampling the medium
+
     def on_block(self, i, k):
         self._update_price(i, k, True)
 
     def on_admit(self, i, k):
+        self._update_price(i, k, False)
+
+    def on_idle(self, i, k):
+        # Demand fell because I yielded, so my estimate of congestion must decay --
+        # otherwise refusing is absorbing and the agent excludes itself permanently.
         self._update_price(i, k, False)
 
     def pick_corridor(self, i, r):
@@ -240,6 +275,8 @@ class TollLambdaArm(BaseArm):
         return int(np.argmin(cost))
 
     def admit(self, i, k):
+        if self.rng.random() < self.EPS_PROBE:
+            return True
         return (1.0 - self.l_hat[i, k]) - self.lam[i, k] > 0.0
 
 
@@ -274,7 +311,7 @@ def run_arm(arm_cls, sigma, n=16, tier=3, horizon=80, episodes=160, verbose=Fals
     stats = defaultdict(list)
 
     for seed in range(episodes):
-        arm.reset()
+        arm.reset_episode()  # lambda / l_hat PERSIST across episodes
         obs, info = env.reset(seed=seed)
         steps = 0
         while True:
@@ -322,6 +359,19 @@ def main():
     p.add_argument('--arms', nargs='+', default=list(ARMS))
     p.add_argument('--verbose', action='store_true', help='per-step log, first episode')
     args = p.parse_args()
+
+    # GATE: at sigma=0 there is no throttle, so admission policy is irrelevant and
+    # every arm collapses to the shared navigator. If it cannot match the
+    # BatchAStarAgent reference (ISR 1.000 on this frozen config), the navigator is
+    # broken and every downstream arm comparison measures navigation, not method.
+    gate = run_arm(BlindArm, 0.0, args.n, args.tier, args.horizon, 64)
+    print(f'NAVIGATOR GATE  ISR@sigma=0 = {gate["isr"]:.3f}  (must be >= 0.99; '
+          f'BatchAStarAgent reference = 1.000)')
+    if gate['isr'] < 0.99:
+        print('  FAIL -- navigator loses agents with no NS present. Arm comparison')
+        print('  below is meaningless; fix navigation before reading any of it.\n')
+    else:
+        print('  PASS\n')
 
     print(f'TOLL comparison  N={args.n} tier={args.tier} horizon={args.horizon} '
           f'episodes={args.episodes}')
