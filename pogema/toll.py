@@ -35,8 +35,9 @@ import statistics
 from collections import defaultdict
 
 import numpy as np
+from pogema import BatchAStarAgent
 
-from contested_ns import CORRIDOR_ROWS, LEFT_W, MID_W, make_contested_env
+from contested_ns import CORRIDOR_ROWS, LEFT_W, MID_W, corridor_of, make_contested_env
 
 WAIT, UP, DOWN, LEFT, RIGHT = 0, 1, 2, 3, 4
 
@@ -92,8 +93,6 @@ class Navigator:
 class BaseArm:
     name = 'base'
 
-    ESCAPE_AFTER = 2   # steps stuck before taking a sidestep (deadlock escape)
-
     def __init__(self, n_agents, n_corridors=len(CORRIDOR_ROWS), seed=0):
         self.n = n_agents
         self.nc = n_corridors
@@ -108,6 +107,7 @@ class BaseArm:
 
     def reset_episode(self):
         """Episode-local bookkeeping ONLY. Never touches l_hat / lam."""
+        self.nav = BatchAStarAgent()
         self.attempts = np.zeros((self.n, self.nc))
         self.blocks = np.zeros((self.n, self.nc))
         self.admits = np.zeros((self.n, self.nc))
@@ -115,7 +115,6 @@ class BaseArm:
         self.chosen = np.full(self.n, -1)
         self.last_xy = [None] * self.n
         self.tried_entry = [None] * self.n
-        self.stuck = np.zeros(self.n, dtype=int)
 
     # -- per-arm hooks ------------------------------------------------
 
@@ -153,48 +152,45 @@ class BaseArm:
             self.on_block(i, k)
         self.tried_entry[i] = None
 
-    def act(self, i, xy, target, active):
-        r, c = xy
-        if not active:
-            self.last_xy[i] = xy
-            return WAIT
-        self.observe(i, xy)
-        region = Navigator.region(r, c)
+    def act_all(self, obs, xys, active, moves):
+        """Navigation is delegated to stock BatchAStarAgent; the arm overrides ONLY
+        the admission decision.
 
-        # DEADLOCK ESCAPE. Agents converging on one corridor row stack up and block
-        # each other under 'soft' collisions; re-issuing the same blocked move stalls
-        # forever. Measured without this: ISR 0.686 at sigma=0 where BatchAStarAgent
-        # gets 1.000, and blind ISR then RISES with severity because the throttle was
-        # desynchronizing the deadlock (§8.3, throttle-as-help).
-        moved = self.last_xy[i] is None or tuple(xy) != tuple(self.last_xy[i])
-        at_mouth = any(Navigator.at_mouth(r, c, k) for k in range(self.nc))
-        self.stuck[i] = 0 if moved else self.stuck[i] + 1
-        if self.stuck[i] >= self.ESCAPE_AFTER and not at_mouth and region == 'home':
-            self.last_xy[i] = xy
-            self.stuck[i] = 0
-            return int(self.rng.choice([UP, DOWN, LEFT, RIGHT]))
+        Hand-rolled routing failed the gate at ISR 0.684 where BatchAStarAgent scores
+        1.000 -- agents converging on a corridor row deadlocked under 'soft'
+        collisions, and blind ISR then ROSE with severity because the throttle was
+        relieving that deadlock. Delegating navigation removes the confound entirely
+        and isolates the method to the one decision it is about."""
+        actions = list(self.nav.act(obs))
 
-        if region == 'delivery':
-            self.last_xy[i] = xy
-            return Navigator.step_in_delivery(r, c, target[0], target[1])
-        if region == 'corridor':
-            self.last_xy[i] = xy
-            return RIGHT  # in service: always drain
+        for i in range(self.n):
+            if not active[i]:
+                continue
+            self.observe(i, xys[i])
+            r, c = xys[i]
+            if corridor_of(r, c) is not None:
+                self.last_xy[i] = xys[i]
+                continue  # in service: never interfere with draining
 
-        k = self.pick_corridor(i, r)
-        self.chosen[i] = k
-        mv = Navigator.step_toward_mouth(r, c, k)
-        self.last_xy[i] = xy
-        if mv is not None:
-            return mv
+            dr, dc = moves[actions[i]]
+            k = corridor_of(r + dr, c + dc)
+            self.last_xy[i] = xys[i]
+            if k is None:
+                continue  # not an entry attempt; pass A* straight through
 
-        if self.admit(i, k):
-            self.attempts[i, k] += 1
-            self.tried_entry[i] = k
-            return RIGHT
-        self.voluntary_waits[i] += 1
-        self.on_idle(i, k)
-        return WAIT
+            self.chosen[i] = k
+            if self.admit(i, k):
+                self.attempts[i, k] += 1
+                self.tried_entry[i] = k
+            else:
+                self.voluntary_waits[i] += 1
+                self.on_idle(i, k)
+                actions[i] = WAIT
+                # A* returns a RANDOM action when it sees itself not move
+                # (a_star_policy.py:112). Clearing its saved position stops our
+                # deliberate hold from being mistaken for being stuck.
+                self.nav.astar_agents[i]._saved_xy = None
+        return actions
 
 
 class BlindArm(BaseArm):
@@ -269,10 +265,11 @@ class TollLambdaArm(BaseArm):
         # otherwise refusing is absorbing and the agent excludes itself permanently.
         self._update_price(i, k, False)
 
-    def pick_corridor(self, i, r):
-        cost = [Navigator.detour(r, k) + self.W_ROUTE * self.lam[i, k]
-                for k in range(self.nc)]
-        return int(np.argmin(cost))
+    # NOTE: price-aware ROUTING (argmin_c [detour_c + w*lam_c]) is DEFERRED.
+    # Navigation is now A*, which picks the shortest path and cannot be steered by a
+    # price without a custom router. What remains is admission-only TOLL: the price
+    # decides WHEN to enter, not WHICH corridor. That is faithful to §4's decision
+    # rule but exercises only half the allocation problem this NS poses.
 
     def admit(self, i, k):
         if self.rng.random() < self.EPS_PROBE:
@@ -314,11 +311,11 @@ def run_arm(arm_cls, sigma, n=16, tier=3, horizon=80, episodes=160, verbose=Fals
         arm.reset_episode()  # lambda / l_hat PERSIST across episodes
         obs, info = env.reset(seed=seed)
         steps = 0
+        moves = env.grid_config.MOVES
         while True:
             xys = env.get_agents_xy(ignore_borders=True)
-            targets = env.get_targets_xy(ignore_borders=True)
-            act = [arm.act(i, xys[i], targets[i], env.grid.is_active[i])
-                   for i in range(n)]
+            active = [env.grid.is_active[i] for i in range(n)]
+            act = arm.act_all(obs, xys, active, moves)
             obs, reward, terminated, truncated, info = env.step(act)
             steps += 1
             if verbose and seed == 0:
