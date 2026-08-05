@@ -242,7 +242,11 @@ class TollLambdaArm(BaseArm):
     name = 'toll'
     RHO = 0.15        # EWMA rate for felt liability
     ALPHA = 0.10      # dual ascent step
-    L_TARGET = 0.25   # target felt-degradation level
+    # DERIVED, not tuned: under the Aloha harm curve team throughput
+    # C*exp(-(L-1)*sigma*A/K) peaks exactly at u = 1, i.e. L = K/(sigma*A).
+    # Driving felt degradation to 1.0 drives the medium to its throughput maximum,
+    # which is what a shadow price is supposed to do. The old 0.25 was arbitrary.
+    L_TARGET = 1.0
     W_ROUTE = 3.0     # price weight in corridor choice
     LAM_MAX = 3.0
 

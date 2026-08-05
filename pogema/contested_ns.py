@@ -112,10 +112,11 @@ class ContestedCorridorNS(PogemaWrapper):
     # max(0, L - K) actually fires: at K_MAX=3 with 8 agents over 3 corridors the
     # damage term never triggered, so tier 3's hysteresis was inert and tier 3 was
     # silently identical to tier 2.
-    K_MAX = {1: 64.0, 2: 2.0, 3: 2.0}
+    K_MAX = {1: 64.0, 2: 6.0, 3: 6.0}
+    HARM = 'aloha'      # 'aloha' = CSMA contention (collapses); 'queue' = M/M/1 (does not)
     TAU_K = 12.0        # capacity regeneration time constant
-    DAMAGE = 0.12       # d
-    K_FLOOR = 0.75      # K may dip and recover, but never far enough that entry
+    DAMAGE = 0.05       # d
+    K_FLOOR = 2.0       # K may dip and recover, but never far enough that entry
                         # becomes impossible -- §3.1 "never irrecoverable"
     H_FLOOR = 0.05      # h(u) = u/max(1-u, H_FLOOR)
     DRIVER_PERIOD = 64
@@ -152,8 +153,26 @@ class ContestedCorridorNS(PogemaWrapper):
         phase = 2 * np.pi * self._spawn_row[agent_idx] / HEIGHT
         return 1.0 + self.S_SPREAD * np.cos(2 * np.pi * self._t / self.S_PERIOD + phase)
 
-    def _h(self, u):
-        return u / max(1.0 - u, self.H_FLOOR)
+    def _p_serve(self, u, s):
+        """Service probability. THIS CHOICE DECIDES WHETHER THE CLASS EXISTS.
+
+        'queue'  h(u)=u/max(1-u,floor), p=1/(1+s*h). Past the clamp h~20u so
+                 p ~ 1/(L-1) and team throughput C*p ~ C/(C+Z-1) is INCREASING in
+                 the number of claimants. Piling in always wins, yielding can never
+                 help, and no price of any kind improves anything. Measured under
+                 this form: TOLL-lambda scored -0.055 against always-attempt -- the
+                 predicted result, not a bug. M/M/1 queues; it does not collapse.
+
+        'aloha'  p = exp(-s*u). Team throughput C*exp(-(L-1)*sigma*A/K) PEAKS at
+                 L* = K/(sigma*A) and collapses beyond it. This is the CSMA /
+                 slotted-Aloha contention curve NS guide §3.1 names explicitly
+                 ("your h(.) should be theirs"). Past the peak, yielding strictly
+                 raises team throughput -- which is the only regime in which a
+                 Pigouvian price is the right answer.
+        """
+        if self.HARM == 'aloha':
+            return float(np.exp(-s * u))
+        return 1.0 / (1.0 + s * (u / max(1.0 - u, self.H_FLOOR)))
 
     # -- gym API ----------------------------------------------------------
 
@@ -227,8 +246,9 @@ class ContestedCorridorNS(PogemaWrapper):
 
             L_minus_i = L[c] - 1.0  # exclude i's own claim
             u = gain[c] * L_minus_i / max(self._K[c], 1e-6)
-            liability = self._susceptibility(i) * self._h(u)
-            p_serve = 1.0 / (1.0 + liability)
+            s_i = self._susceptibility(i)
+            p_serve = self._p_serve(u, s_i)
+            liability = s_i * u  # felt degradation, what TOLL-lambda prices
 
             self._ep['u'].append(u)
             self._ep['l'].append(liability)
@@ -305,7 +325,11 @@ class ContestedCorridorNS(PogemaWrapper):
 
 
 def make_contested_env(num_agents=8, sigma=0.0, tier=3, horizon=128,
-                       corridor_width=1, expose_oracle=False, seed=None, trace=False):
+                       corridor_width=3, expose_oracle=False, seed=None, trace=False):
+    # corridor_width=3: a 1-wide corridor is a SERIAL resource, not a shared one --
+    # geometry caps simultaneous claimants at ~1 per mouth (measured: 0.4), so there
+    # is nobody for an agent's draw to cost. §7 says load is REGIONAL occupancy;
+    # width 3 makes that literal and lets many agents contend at once.
     cfg = GridConfig(
         map=build_map(corridor_width),
         num_agents=num_agents,
