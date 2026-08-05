@@ -91,7 +91,11 @@ class ContestedCorridorNS(PogemaWrapper):
     """sigma is the ONLY exposed dial (§9). Everything else is fixed and published."""
 
     # published constants (§9: fixed per environment)
-    K_MAX = {1: 64.0, 2: 3.0, 3: 3.0}  # tier 1 = "fixed and ample" -> no contention
+    # tier 1 = "fixed and ample" -> no contention. Tiers 2/3 must sit low enough that
+    # max(0, L - K) actually fires: at K_MAX=3 with 8 agents over 3 corridors the
+    # damage term never triggered, so tier 3's hysteresis was inert and tier 3 was
+    # silently identical to tier 2.
+    K_MAX = {1: 64.0, 2: 2.0, 3: 2.0}
     TAU_K = 12.0        # capacity regeneration time constant
     DAMAGE = 0.25       # d
     H_FLOOR = 0.05      # h(u) = u/max(1-u, H_FLOOR)
@@ -150,11 +154,28 @@ class ContestedCorridorNS(PogemaWrapper):
         active = self.grid.is_active
         moves = self.grid_config.MOVES
 
-        # occupancy L_c: active agents whose CURRENT cell is in corridor c
-        here = [corridor_of(x, y, self.corridor_width) if active[i] else None
-                for i, (x, y) in enumerate(xy)]
+        # Load Phi = attempted DEMAND on the corridor, not realized occupancy:
+        # an agent inside c, or queued at its mouth trying to enter, is contending
+        # for c either way (a backlogged CSMA/CA station is still load).
+        #
+        # Occupancy-based load makes the NS self-correcting: throttling empties the
+        # corridor, which drops L_{-i} to 0, which grants the next arrival free
+        # passage -- the medium ends up scheduling the team one-at-a-time and ISR
+        # RECOVERS as sigma grows. Measured with occupancy: ISR 0.52 at sigma=3 but
+        # 0.76 at sigma=6, non-monotonic. Demand keeps retries on the books.
+        claim = []
+        for i, (x, y) in enumerate(xy):
+            if not active[i]:
+                claim.append(None)
+                continue
+            c = corridor_of(x, y, self.corridor_width)
+            if c is None:
+                dx, dy = moves[actions[i]]
+                c = corridor_of(x + dx, y + dy, self.corridor_width)
+            claim.append(c)
+
         L = np.zeros(self._n_corr)
-        for c in here:
+        for c in claim:
             if c is not None:
                 L[c] += 1
 
@@ -162,14 +183,11 @@ class ContestedCorridorNS(PogemaWrapper):
         for i, (x, y) in enumerate(xy):
             if not active[i]:
                 continue
-            dx, dy = moves[actions[i]]
-            dest = corridor_of(x + dx, y + dy, self.corridor_width)
-            c = here[i] if here[i] is not None else dest
+            c = claim[i]
             if c is None:
                 continue  # not using the medium this step; home/delivery regions are free
 
-            # L_{-i}: exclude self. An agent still outside contributes nothing yet.
-            L_minus_i = L[c] - (1.0 if here[i] == c else 0.0)
+            L_minus_i = L[c] - 1.0  # exclude i's own claim
             u = gain * L_minus_i / max(self._K[c], 1e-6)
             liability = self._susceptibility(i) * self._h(u)
             p_serve = 1.0 / (1.0 + liability)
