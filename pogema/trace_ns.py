@@ -37,12 +37,13 @@ def show_steps(args):
     log = env.trace_log
     print(f'sigma={args.sigma} tier={args.tier} N={args.n} horizon={args.horizon} seed={args.seed}')
     print(f'ISR={metrics.get("ISR", 0):.3f}\n')
-    print(f'{"t":>4} {"A":>5} {"K0":>5} {"K1":>5} {"K2":>5} {"dem":>10} '
+    print(f'{"t":>4} {"A(per corr)":>16} {"K0":>5} {"K1":>5} {"K2":>5} {"dem":>10} '
           f'{"in":>3} {"que":>4} {"idle":>5} {"done":>5} {"thr":>4} '
           f'{"u_mn":>6} {"u_mx":>6} {"p_min":>6}')
     for r in log:
         dem = ','.join(f'{d:.0f}' for d in r['demand'])
-        print(f'{r["t"]:>4} {r["A"]:>5.2f} {r["K"][0]:>5.2f} {r["K"][1]:>5.2f} '
+        a = ','.join(f'{v:.2f}' for v in np.atleast_1d(r['A']))
+        print(f'{r["t"]:>4} {a:>16} {r["K"][0]:>5.2f} {r["K"][1]:>5.2f} '
               f'{r["K"][2]:>5.2f} {dem:>10} {r["n_inside"]:>3} {r["n_queued"]:>4} '
               f'{r["n_idle"]:>5} {r["n_done"]:>5} {r["throttled"]:>4} '
               f'{r["u_mean"]:>6.2f} {r["u_max"]:>6.2f} {r["p_min"]:>6.3f}')

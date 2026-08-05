@@ -63,6 +63,23 @@ def corridor_of(row, col, corridor_width=1):
 A_MIN = 0.35  # baseline bot traffic -- the driver NEVER reaches zero
 
 
+def shift_driver_all(t, n_corridors=3, period=64, a_min=A_MIN):
+    """Per-corridor driver with STAGGERED phases -- the bot shift works aisle by
+    aisle, so corridor c peaks at t + c*period/n.
+
+    With a single global A(t) the corridors are always priced identically, so
+    "which corridor" is never a decision and only "when" remains -- and the random
+    admission throttle already handles "when" by itself. Measured with a global
+    driver: throttle 0.706 moved ISR only 1.000 -> 0.991, because there was no
+    allocation left to get wrong. Staggered phases make the cheap corridor rotate,
+    so shortest-path routing (always the NEAREST corridor) walks into the peak
+    while a coordinated team tracks the trough. That is the T3 phase-tracking
+    allocation problem (§5) and what METHOD §4's role emergence prices."""
+    return np.array([shift_driver(t + round(c * period / n_corridors), period=period,
+                                  a_min=a_min)
+                     for c in range(n_corridors)])
+
+
 def shift_driver(t, period=64, ramp_frac=0.15, on_frac=0.35, a_min=A_MIN):
     """Warehouse bot-shift schedule: ramp up, hold, ramp down, back to baseline
     (§8.6 -- shape should match the domain; a shift is a trapezoid, not a sinusoid).
@@ -153,7 +170,7 @@ class ContestedCorridorNS(PogemaWrapper):
 
     def step(self, actions):
         actions = list(actions)
-        A = shift_driver(self._t, self.DRIVER_PERIOD)
+        A = shift_driver_all(self._t, self._n_corr, self.DRIVER_PERIOD)  # per corridor
         gain = self.sigma * A  # multiplicative on the cross-agent term ONLY
 
         xy = self.get_agents_xy(ignore_borders=True)
@@ -209,7 +226,7 @@ class ContestedCorridorNS(PogemaWrapper):
                 continue
 
             L_minus_i = L[c] - 1.0  # exclude i's own claim
-            u = gain * L_minus_i / max(self._K[c], 1e-6)
+            u = gain[c] * L_minus_i / max(self._K[c], 1e-6)
             liability = self._susceptibility(i) * self._h(u)
             p_serve = 1.0 / (1.0 + liability)
 
@@ -230,16 +247,16 @@ class ContestedCorridorNS(PogemaWrapper):
         # sigma gates the damage so sigma=0 leaves K_c == K_max exactly.
         if self.tier >= 3:
             overload = np.maximum(0.0, L - self._K)
-            self._K += (self.k_max - self._K) / self.TAU_K - self.DAMAGE * gain * overload
+            self._K += (self.k_max - self._K) / self.TAU_K - self.DAMAGE * gain * overload  # gain is per-corridor
             self._K = np.clip(self._K, self.K_FLOOR, self.k_max)
 
-        self._ep['A'].append(A)
+        self._ep['A'].append(float(A.mean()))
         self._ep['throttled'] += n_throttled
         self._ep['K_min'] = min(self._ep['K_min'], float(self._K.min()))
 
         if self.trace:
             self.trace_log.append(dict(
-                t=self._t, A=A,
+                t=self._t, A=A.copy(),
                 K=self._K.copy(),
                 demand=L.copy(),
                 n_inside=sum(1 for c in inside if c is not None),
@@ -260,7 +277,7 @@ class ContestedCorridorNS(PogemaWrapper):
 
         if self.expose_oracle:  # §6.4 oracle-driver gate: true A, K, l_i in info
             for i in range(len(infos)):
-                infos[i]['oracle'] = {'A': A, 'K': self._K.copy(), 'sigma': self.sigma}
+                infos[i]['oracle'] = {'A': A.copy(), 'K': self._K.copy(), 'sigma': self.sigma}
 
         if all(terminated) or all(truncated):
             infos[0].setdefault('metrics', {}).update(
