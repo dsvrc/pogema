@@ -28,11 +28,19 @@ def build_map(left_w=6, mid_w=12, right_w=6, height=13, corridor_rows=(2, 6, 10)
 
     Every agent must cross, so load Phi = corridor occupancy is task commitment,
     not a trigger an agent can quietly stop pulling (NS guide §8.9).
-    @ = possible agent start, $ = possible target, # = obstacle.
+
+    @ = possible agent start, $ = possible target, # = obstacle,
+    ! = free but in NEITHER pool (grid_config.py:309 -- '!' is in special_chars
+        yet matches neither the '@' nor the '$' branch).
+
+    Corridors MUST be '!', not '.'. A '.' joins both pools, so agents spawn
+    mid-corridor and targets land inside corridors -- that creates counter-flow
+    and head-on deadlock in a one-wide corridor, and destroys the guarantee that
+    every agent crosses the medium exactly once.
     """
     open_rows = {r0 + k for r0 in corridor_rows for k in range(corridor_width)}
     return '\n'.join(
-        '@' * left_w + ('.' if r in open_rows else '#') * mid_w + '$' * right_w
+        '@' * left_w + ('!' if r in open_rows else '#') * mid_w + '$' * right_w
         for r in range(height)
     )
 
