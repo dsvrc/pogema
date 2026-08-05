@@ -7,20 +7,21 @@ stationary reference: it measures B0 and runs the N=1 byte-identity certificate 
 
 Freeze the config only once B0 >= ~0.99 AND slack >= 1.2 (§6.6, §6.9).
 
-NOTE: neither policy here is a MAPF solver. B0 must ultimately come from the
-centralized scheduler required by §6.5/§6.7. These are diagnostics.
+Policy is stock POGEMA BatchAStarAgent. It is a decentralized partial-obs
+baseline, not a MAPF solver -- the §6.5/§6.7 centralized scheduler is still owed.
+
+Measured B0 (N=8, horizon=128, corridor_width=1, soft, 160 eps):
+    ISR 1.000  CSR 1.000  truncated 0/160  makespan 30.8/61  slack 2.10
 
 Usage:
-    python run_pogema_contested.py --n 8 --episodes 160            # B0 (queueing policy)
-    python run_pogema_contested.py --n 8 --policy astar            # stock POGEMA baseline
+    python run_pogema_contested.py --n 8 --episodes 160            # B0
     python run_pogema_contested.py --n 1 --episodes 32             # N=1 certificate
-    python run_pogema_contested.py --n 8 --corridor-width 2        # widen the medium
+    python run_pogema_contested.py --n 16 --episodes 160           # scaling (T2)
 """
 import argparse
 import statistics
 
 from pogema import BatchAStarAgent, GridConfig, pogema_v0
-from pogema.a_star_policy import AStarAgent, h
 
 
 def build_map(left_w=6, mid_w=12, right_w=6, height=13, corridor_rows=(2, 6, 10), corridor_width=1):
@@ -54,37 +55,6 @@ BASE_CONFIG = dict(
 )
 
 
-class QueueingAStarAgent(AStarAgent):
-    """Stock AStarAgent random-walks whenever it is blocked (a_star_policy.py:112),
-    which shatters corridor queues. Hold position instead; keep a small jitter so
-    genuinely symmetric stalls can still break."""
-
-    def act(self, obs):
-        xy, target_xy = obs['xy'], obs['target_xy']
-        blocked = self._saved_xy is not None and h(self._saved_xy, xy) == 0 and xy != target_xy
-        if blocked and self._rnd.random() > 0.1:
-            self._saved_xy = xy
-            return 0  # wait
-        return super().act(obs)
-
-
-class QueueingBatchAgent:
-    def __init__(self):
-        self.agents = {}
-
-    def act(self, observations):
-        actions = []
-        for idx, obs in enumerate(observations):
-            if idx not in self.agents:
-                # stock BatchAStarAgent seeds every agent with 0; decorrelate them
-                self.agents[idx] = QueueingAStarAgent(seed=idx)
-            actions.append(self.agents[idx].act(obs))
-        return actions
-
-    def reset_states(self):
-        self.agents = {}
-
-
 def run_episode(env, agent, seed):
     agent.reset_states()
     obs, info = env.reset(seed=seed)
@@ -106,8 +76,6 @@ def main():
     p.add_argument('--corridor-width', type=int, default=1)
     p.add_argument('--collision', default=BASE_CONFIG['collision_system'],
                    choices=['soft', 'block_both', 'priority'])
-    p.add_argument('--policy', default='queue', choices=['queue', 'astar'],
-                   help="'astar' = stock BatchAStarAgent (random-walks when blocked)")
     args = p.parse_args()
 
     grid = build_map(corridor_width=args.corridor_width)
@@ -117,7 +85,7 @@ def main():
                         'collision_system': args.collision,
                         'max_episode_steps': args.horizon})
     env = pogema_v0(grid_config=cfg)
-    agent = QueueingBatchAgent() if args.policy == 'queue' else BatchAStarAgent()
+    agent = BatchAStarAgent()  # stock POGEMA baseline
 
     isr, csr, solved_len, n_trunc = [], [], [], 0
     for seed in range(args.episodes):
@@ -134,7 +102,7 @@ def main():
     worst = max(solved_len) if solved_len else float('inf')
 
     print(f'N={args.n}  horizon={args.horizon}  corridor_width={args.corridor_width}  '
-          f'collision={args.collision}  policy={args.policy}  episodes={args.episodes}')
+          f'collision={args.collision}  episodes={args.episodes}')
     print(f'  ISR (= B0 at severity 0) : {statistics.mean(isr):.3f}')
     print(f'  CSR                      : {statistics.mean(csr):.3f}')
     print(f'  truncated episodes       : {n_trunc}/{args.episodes} ({n_trunc / args.episodes:.1%})')
