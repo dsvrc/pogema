@@ -334,6 +334,7 @@ def run_arm(arm_cls, sigma, n=16, tier=3, horizon=80, episodes=160, verbose=Fals
         att, blk = arm.attempts.sum(), arm.blocks.sum()
         usage = arm.attempts.sum(axis=0)
         share = usage / max(usage.sum(), 1)
+        stats['eplen'].append(m.get('ep_length', float('nan')))  # PRIMARY metric
         stats['isr'].append(m.get('ISR', 0.0))
         stats['csr'].append(m.get('CSR', 0.0))
         stats['slack'].append(m.get('ns_slack', float('nan')))
@@ -377,7 +378,7 @@ def main():
     print(f'TOLL comparison  N={args.n} tier={args.tier} horizon={args.horizon} '
           f'episodes={args.episodes}')
     print('sigma range restricted to slack>=1.2 (§6.6); sigma>3 is capacity-bound\n')
-    print(f'{"arm":>6} {"sigma":>6} {"ISR":>7} {"CSR":>7} {"lam":>6} {"lam_mx":>7} '
+    print(f'{"arm":>6} {"sigma":>6} {"TIME":>7} {"ISR":>7} {"lam":>6} {"lam_mx":>7} '
           f'{"l_hat":>6} {"blk_rt":>7} {"attempt":>8} {"vol_wait":>9} '
           f'{"balance":>8} {"slack":>7}')
     results = {}
@@ -388,7 +389,7 @@ def main():
             r = run_arm(ARMS[name], sigma, args.n, args.tier, args.horizon,
                         args.episodes, args.verbose)
             results[(name, sigma)] = r
-            print(f'{name:>6} {sigma:>6.1f} {r["isr"]:>7.3f} {r["csr"]:>7.3f} '
+            print(f'{name:>6} {sigma:>6.1f} {r["eplen"]:>7.1f} {r["isr"]:>7.3f} '
                   f'{r["lam"]:>6.3f} {r["lam_max"]:>7.3f} {r["l_hat"]:>6.3f} '
                   f'{r["block_rate"]:>7.3f} {r["attempts"]:>8.0f} '
                   f'{r["vol_wait"]:>9.0f} {r["balance"]:>8.3f} {r["slack"]:>7.2f}')
@@ -401,11 +402,14 @@ def main():
     print('  vol_wait high, ISR down -> synchronized backoff; everyone yields at once.')
     print('  balance flat vs blind   -> price-aware ROUTING is doing nothing.')
     print('  toll <= aimd            -> §9.4: the method contribution collapses.')
+    print('\nTIME is the primary metric (lower is better): the NS delays agents and')
+    print('a good method navigates through it faster. ISR is delay-blind and only')
+    print('registers harm via truncation, which is why the horizon had to be squeezed.')
     for sigma in args.sigmas:
         if ('toll', sigma) in results and ('aimd', sigma) in results:
-            d = results[('toll', sigma)]['isr'] - results[('aimd', sigma)]['isr']
-            b = results[('toll', sigma)]['isr'] - results[('blind', sigma)]['isr']
-            print(f'  sigma={sigma}: toll-aimd={d:+.3f}  toll-blind={b:+.3f}')
+            t, a, b = (results[(k, sigma)]['eplen'] for k in ('toll', 'aimd', 'blind'))
+            print(f'  sigma={sigma}: time toll={t:.1f} aimd={a:.1f} blind={b:.1f}  '
+                  f'toll-blind={t - b:+.1f} steps ({"BETTER" if t < b else "WORSE"})')
 
 
 if __name__ == '__main__':

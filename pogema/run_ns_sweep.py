@@ -26,7 +26,8 @@ SEVERITIES = [0.0, 0.5, 1.0, 2.0, 3.0, 4.0, 6.0]
 def run(num_agents, sigma, tier, horizon, episodes):
     env = make_contested_env(num_agents=num_agents, sigma=sigma, tier=tier, horizon=horizon)
     agent = BatchAStarAgent()
-    isr, csr, thr, umean, kmin, slack, solved, n_trunc = [], [], [], [], [], [], [], 0
+    isr, csr, thr, umean, kmin, slack, eplen, solved, n_trunc = (
+        [], [], [], [], [], [], [], [], 0)
     for seed in range(episodes):
         agent.reset_states()
         obs, info = env.reset(seed=seed)
@@ -43,6 +44,10 @@ def run(num_agents, sigma, tier, horizon, episodes):
         umean.append(m.get('ns_u_mean', 0.0))
         kmin.append(m.get('ns_K_min', float('nan')))
         slack.append(m.get('ns_slack', float('nan')))
+        # POGEMA's own time metric (metrics.py:95), computed all along and ignored:
+        # mean per-agent ARRIVAL TIME. Unlike ISR it sees delay directly, so the
+        # horizon no longer has to bind for the NS to register.
+        eplen.append(m.get('ep_length', float('nan')))
         if all(truncated):
             n_trunc += 1
         else:
@@ -51,7 +56,7 @@ def run(num_agents, sigma, tier, horizon, episodes):
         isr=statistics.mean(isr), csr=statistics.mean(csr),
         throttle=statistics.mean(thr), u=statistics.mean(umean),
         kmin=statistics.mean(kmin), slack=statistics.mean(slack),
-        trunc=n_trunc / episodes,
+        eplen=statistics.mean(eplen), trunc=n_trunc / episodes,
         makespan=statistics.mean(solved) if solved else float('nan'),
     )
 
@@ -59,20 +64,21 @@ def run(num_agents, sigma, tier, horizon, episodes):
 def sweep(args):
     print(f'severity sweep  N={args.n}  tier={args.tier}  horizon={args.horizon}  '
           f'episodes={args.episodes}  policy=BatchAStarAgent')
-    print(f'{"sigma":>6} {"ISR":>7} {"CSR":>7} {"throttle":>9} {"u_mean":>8} '
-          f'{"K_min":>7} {"slack":>7} {"trunc":>7} {"makespan":>9}')
-    b0, isrs, usable = None, [], []
+    print(f'{"sigma":>6} {"TIME":>7} {"vs B0":>7} {"ISR":>7} {"CSR":>7} '
+          f'{"throttle":>9} {"u_mean":>8} {"K_min":>7} {"slack":>7} {"trunc":>7}')
+    b0, b0_time, isrs, usable = None, None, [], []
     for sigma in SEVERITIES:
         r = run(args.n, sigma, args.tier, args.horizon, args.episodes)
         if b0 is None:
-            b0 = r['isr']
+            b0, b0_time = r['isr'], r['eplen']
         isrs.append(r['isr'])
         if r['slack'] >= 1.2:
             usable.append(sigma)
-        flag = '' if r['slack'] >= 1.2 else '  <-- §3.1 VIOLATED'
-        print(f'{sigma:>6.1f} {r["isr"]:>7.3f} {r["csr"]:>7.3f} {r["throttle"]:>9.3f} '
-              f'{r["u"]:>8.2f} {r["kmin"]:>7.2f} {r["slack"]:>7.2f} '
-              f'{r["trunc"]:>7.1%} {r["makespan"]:>9.1f}{flag}')
+        flag = '' if r['slack'] >= 1.2 else '  <-- §3.1'
+        ratio = r['eplen'] / b0_time if b0_time else float('nan')
+        print(f'{sigma:>6.1f} {r["eplen"]:>7.1f} {ratio:>7.2f}x {r["isr"]:>6.3f} '
+              f'{r["csr"]:>7.3f} {r["throttle"]:>9.3f} {r["u"]:>8.2f} '
+              f'{r["kmin"]:>7.2f} {r["slack"]:>7.2f} {r["trunc"]:>7.1%}{flag}')
     monotone = all(a >= b - 0.02 for a, b in zip(isrs, isrs[1:]))
     print()
     print(f'  B0 (sigma=0) = {b0:.3f}   monotone: {"YES" if monotone else "NO -- severity is not well-ordered"}')

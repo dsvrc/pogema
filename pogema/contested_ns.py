@@ -115,7 +115,7 @@ class ContestedCorridorNS(PogemaWrapper):
     K_MAX = {1: 64.0, 2: 6.0, 3: 6.0}
     HARM = 'aloha'      # 'aloha' = CSMA contention (collapses); 'queue' = M/M/1 (does not)
     TAU_K = 12.0        # capacity regeneration time constant
-    DAMAGE = 0.05       # d
+    DAMAGE = 0.15       # d -- per FAILED ATTEMPT (collision), not per unit overload
     K_FLOOR = 2.0       # K may dip and recover, but never far enough that entry
                         # becomes impossible -- §3.1 "never irrecoverable"
     H_FLOOR = 0.05      # h(u) = u/max(1-u, H_FLOOR)
@@ -224,6 +224,7 @@ class ContestedCorridorNS(PogemaWrapper):
                 L[c] += 1
 
         n_throttled = 0
+        collisions = np.zeros(self._n_corr)  # failed attempts per corridor
         step_u, step_p = [], []
         for i, (x, y) in enumerate(xy):
             if not active[i]:
@@ -262,12 +263,28 @@ class ContestedCorridorNS(PogemaWrapper):
             if actions[i] != 0 and self._rng.random() > p_serve:
                 actions[i] = 0
                 n_throttled += 1
+                collisions[c] += 1  # wasted airtime -- damages K below
 
         # capacity: regenerate toward K_max, damaged only by overload (§4).
         # sigma gates the damage so sigma=0 leaves K_c == K_max exactly.
         if self.tier >= 3:
-            overload = np.maximum(0.0, L - self._K)
-            self._K += (self.k_max - self._K) / self.TAU_K - self.DAMAGE * gain * overload  # gain is per-corridor
+            # DAMAGE IS DRIVEN BY FAILED ATTEMPTS, NOT BY OCCUPANCY.
+            #
+            # This is the whole fix. Previously a blocked agent simply stayed put --
+            # exactly what it would have done by choosing to wait -- so attempting
+            # cost nothing and "always try" weakly dominated every cautious policy.
+            # No price of any kind can beat a free action, which is why TOLL scored
+            # -0.055 against blind regardless of h, tuning, or lambda.
+            #
+            # Real contention wastes the medium: in Aloha/CSMA a collision destroys
+            # both packets AND burns the airtime for everyone. That waste is why
+            # those protocols need backoff. With collisions damaging K, restraint
+            # preserves capacity others use -- which is §2.2's "my draw costs
+            # everyone else, delayed" -- and yielding finally has value.
+            #
+            # Recoverability (§3.1) is preserved: K regenerates toward k_max, is
+            # floored, and in-service agents always drain, so no state is terminal.
+            self._K += (self.k_max - self._K) / self.TAU_K - self.DAMAGE * collisions
             self._K = np.clip(self._K, self.K_FLOOR, self.k_max)
 
         # §6.6 SLACK AUDIT. K_eff_c = the load corridor c can carry with NO penalty:
